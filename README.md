@@ -148,25 +148,6 @@ Configure the backend environment variables using the existing environment confi
 - Integration of third-party services and AI capabilities.
 - Understanding of scalable e-commerce application architecture.
 
-## 🤝 Original Project & Attribution
-
-This repository is based on the original MAISON project by **Anant Duhan**.
-
-Original repository:  
-https://github.com/AnantDuhan/MAISON-Order-Planning
-
-The original project author and license are acknowledged. This repository is intended to document my learning, exploration, and any modifications made to the project. See the original `LICENSE` file for licensing terms.
-
-### My Contributions
-
-Add only the changes you personally implemented or can confidently explain, for example:
-
-- [Describe your frontend modifications]
-- [Describe your backend/API modifications]
-- [Describe any features you independently implemented]
-- [Describe testing, debugging, or deployment work]
-
----
 
 <div align="center">
 
