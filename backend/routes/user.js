@@ -1,0 +1,154 @@
+const express = require('express');
+const {
+   registerUser,
+   loginUser,
+   logout,
+   forgotPassword,
+   resetPassword,
+   getUserDetails,
+    updateProfile,
+    registerPushToken,
+   updatePassword,
+   getAllUsers,
+   getSingleUser,
+   updateUserRole,
+   deleteUser,
+   googleLogin,
+   verifyLoginOtp,
+   setupAdminTwoFactorEnrollment,
+   verifyAdminTwoFactorEnrollment,
+   setupTwoFactorAuth,
+   verifyTwoFactorAuth,
+   disableTwoFactorAuth,
+   getTrustedDevices,
+   revokeTrustedDevice,
+   revokeAllTrustedDevices,
+   getAddresses,
+   addAddress,
+   deleteAddress,
+   verifyEmail,
+   resendVerificationEmail,
+   demoQuickLogin,
+} = require('../controllers/user');
+
+const { isAuthUser, authRoles } = require('../middleware/auth');
+const { authLimiter, emailLimiter, accountLimiter, otpSendLimiter } = require('../middleware/rateLimiter');
+const {
+   loginMethods,
+   requestEmailCode,
+   verifyEmailCode,
+   verifyMagicLink,
+   requestPhoneOtp,
+   verifyPhoneOtp,
+} = require('../controllers/passwordless');
+const {
+   listPasskeys,
+   passkeyRegisterOptions,
+   passkeyRegisterVerify,
+   deletePasskey,
+   passkeyLoginOptions,
+   passkeyLoginVerify,
+} = require('../controllers/passkey');
+const demoGuard = require('../middleware/demoGuard');
+const multer = require('multer');
+const { contactUs } = require('../controllers/contact');
+const { subscriber, unsubscribe } = require('../controllers/subscribe');
+
+// Configure Multer for file uploads
+const upload = multer({
+    storage: multer.memoryStorage(),
+    fileFilter: (req, file, cb) => {
+        if (
+            file.mimetype === 'image/png' ||
+            file.mimetype === 'image/jpg' ||
+            file.mimetype === 'image/jpeg' ||
+            file.mimetype === 'image/webp'
+        ) {
+            cb(null, true);
+        } else {
+            cb(new Error('Invalid file type.'));
+        }
+    },
+    limits: { fileSize: 5 * 1024 * 1024 }
+});
+
+const { requireFeature } = require('../services/featureFlags');
+const router = express.Router();
+
+router.route('/register').post(authLimiter, upload.single('image'), registerUser);
+
+router.route('/login').post(authLimiter, loginUser);
+
+// Passwordless sign-in (existing accounts). All end in the same 2FA step.
+router.route('/login/methods').get(loginMethods);
+const passwordless = requireFeature('passwordlessLogin');
+const passkeys = requireFeature('passkeys');
+router.route('/login/email-code').post(passwordless, otpSendLimiter, requestEmailCode);
+router.route('/login/email-code/verify').post(passwordless, authLimiter, verifyEmailCode);
+router.route('/login/magic').post(passwordless, authLimiter, verifyMagicLink);
+router.route('/login/phone-otp').post(passwordless, otpSendLimiter, requestPhoneOtp);
+router.route('/login/phone-otp/verify').post(passwordless, authLimiter, verifyPhoneOtp);
+router.route('/login/passkey/options').post(passkeys, authLimiter, passkeyLoginOptions);
+router.route('/login/passkey/verify').post(passkeys, authLimiter, passkeyLoginVerify);
+
+// Passkey management (signed in)
+router.route('/passkeys').get(isAuthUser, listPasskeys);
+router.route('/passkeys/register/options').post(isAuthUser, passkeys, demoGuard('manage-passkeys'), accountLimiter, passkeyRegisterOptions);
+router.route('/passkeys/register/verify').post(isAuthUser, passkeys, demoGuard('manage-passkeys'), accountLimiter, passkeyRegisterVerify);
+router.route('/passkeys/:id').delete(isAuthUser, demoGuard('manage-passkeys'), deletePasskey);
+
+router.route("/verify-email/:token").get(authLimiter, verifyEmail);
+
+router
+  .route("/resend-verification")
+  .post(emailLimiter, resendVerificationEmail);
+
+// Two-factor authentication
+router.route('/login/2fa').post(authLimiter, verifyLoginOtp);      // complete login with a TOTP code
+router.route('/login/2fa/setup').post(authLimiter, setupAdminTwoFactorEnrollment);
+router.route('/login/2fa/enroll').post(authLimiter, verifyAdminTwoFactorEnrollment);
+router.route('/2fa/setup').get(isAuthUser, demoGuard('manage-2fa'), setupTwoFactorAuth);    // begin setup → returns QR
+router.route('/2fa/verify').post(isAuthUser, demoGuard('manage-2fa'), accountLimiter, verifyTwoFactorAuth); // confirm setup → enables 2FA
+router.route('/2fa/disable').post(isAuthUser, demoGuard('manage-2fa'), accountLimiter, disableTwoFactorAuth);
+// Devices where the user chose "don't ask for a code on this device".
+router.route('/2fa/trusted-devices')
+    .get(isAuthUser, getTrustedDevices)
+    .delete(isAuthUser, accountLimiter, revokeAllTrustedDevices);
+router.route('/2fa/trusted-devices/:id').delete(isAuthUser, accountLimiter, revokeTrustedDevice);
+
+router.route('/password/forgot').post(authLimiter, forgotPassword);
+
+router.route('/password/reset/:token').put(authLimiter, resetPassword);
+
+router.route('/logout').get(logout);
+
+router.route('/me').get(isAuthUser, getUserDetails);
+
+// Address book
+router.route('/addresses').get(isAuthUser, getAddresses);
+router.route('/address/new').post(isAuthUser, addAddress);
+router.route('/address/:addressId').delete(isAuthUser, deleteAddress);
+
+router.route('/me/update').put(isAuthUser, demoGuard('update-profile'), upload.single('image'), updateProfile);
+router.route('/me/push-token').put(isAuthUser, registerPushToken);
+
+router.route('/password/update').put(isAuthUser, demoGuard('change-password'), accountLimiter, updatePassword);
+
+router.route('/admin/users').get(isAuthUser, authRoles('admin'), getAllUsers);
+
+router
+    .route('/admin/user/:id')
+    .get(isAuthUser, authRoles('admin'), getSingleUser)
+    .put(isAuthUser, authRoles('admin'), updateUserRole)
+    .delete(isAuthUser, authRoles('admin'), deleteUser);
+
+router.route('/contact-us').post(emailLimiter, contactUs);
+
+router.route('/subscribe').post(requireFeature('newsletter'), emailLimiter, subscriber);
+router.route('/unsubscribe/:token').get(unsubscribe);
+
+router.route('/auth/google').post(requireFeature('googleLogin'), authLimiter, googleLogin);
+
+router.route('/demo/quick-login').get(accountLimiter, demoQuickLogin);
+
+module.exports = router;

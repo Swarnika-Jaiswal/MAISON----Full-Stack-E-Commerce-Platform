@@ -1,0 +1,326 @@
+const Subscription = require('../models/plusMembership');
+const User = require('../models/user');
+const ejs = require('ejs');
+const path = require('path');
+const generateId = require('../utils/generateId');
+const { sendEmailInBackground } = require('../utils/sendEmail');
+const {
+    cashfreeRequest,
+    getCashfreePlan,
+    verifyCashfreeWebhook,
+} = require('../utils/cashfree');
+const logger = require('../config/logger');
+const { createMembershipInvoice, emailInvoice } = require('../services/invoiceService');
+
+const { PLANS, planFor, tierOf } = require('../utils/membershipPlans');
+
+// Membership as sent to the browser, with its tier spelled out.
+const withTier = membership => ({ ...(membership.toObject ? membership.toObject() : membership), tier: tierOf(membership) });
+
+const getSubscriptionDetails = cashfreeSubscription =>
+    cashfreeSubscription.subscription_details || cashfreeSubscription;
+
+const getNextPaymentDate = cashfreeSubscription => {
+    const details = getSubscriptionDetails(cashfreeSubscription);
+    const value = details.next_schedule_date || cashfreeSubscription.next_schedule_date;
+    return value ? new Date(value) : null;
+};
+
+const sendActivationEmailOnce = async membership => {
+    const claimedMembership = await Subscription.findOneAndUpdate(
+        { _id: membership._id, isActive: true, activationEmailSent: { $ne: true } },
+        {
+            activationEmailSent: true,
+            activatedAt: membership.activatedAt || new Date(),
+        },
+        { returnDocument: 'after' },
+    );
+    if (!claimedMembership) return;
+
+    const user = await User.findById(claimedMembership.user).select('name email');
+    if (!user?.email) return;
+
+    const nextPaymentDate = claimedMembership.nextPaymentDate
+        ? new Date(claimedMembership.nextPaymentDate).toLocaleDateString()
+        : 'Cashfree will confirm your next billing date';
+    const emailMessage = await ejs.renderFile(
+        path.join(__dirname, '../mails/membership-activated.ejs'),
+        {
+            user,
+            membership: claimedMembership,
+            nextPaymentDate,
+        },
+    );
+
+    sendEmailInBackground({
+        email: user.email,
+        sender: "support",  
+        subject: 'Your Maison membership is now active',
+        html: emailMessage,
+    });
+};
+
+const syncMembership = async membership => {
+    try {
+        const cashfreeSubscription = await cashfreeRequest(
+            `/subscriptions/${encodeURIComponent(membership.subscriptionId)}`,
+        );
+        const details = getSubscriptionDetails(cashfreeSubscription);
+        membership.status = details.subscription_status || membership.status;
+        membership.isActive = membership.status === 'ACTIVE';
+        membership.nextPaymentDate = getNextPaymentDate(cashfreeSubscription);
+        if (!membership.nextPaymentDate && membership.isActive) {
+            const nextPaymentDate = new Date(membership.createdAt || Date.now());
+            nextPaymentDate.setMonth(nextPaymentDate.getMonth() + membership.duration);
+            membership.nextPaymentDate = nextPaymentDate;
+        }
+        await membership.save();
+        if (membership.isActive) {
+            await sendActivationEmailOnce(membership);
+        }
+    } catch (error) {
+        // Keep the last webhook-backed state if Cashfree is temporarily unavailable.
+        console.error('Could not refresh Cashfree membership status:', error.message);
+    }
+    return membership;
+};
+
+const ensurePlan = async plan => {
+    try {
+        return await getCashfreePlan(plan.planId);
+    } catch (error) {
+        if (error.statusCode !== 404) {
+            throw error;
+        }
+    }
+
+    try {
+        return await cashfreeRequest('/plans', {
+            method: 'POST',
+            body: JSON.stringify({
+                plan_id: plan.planId,
+                plan_name: plan.name,
+                plan_type: 'PERIODIC',
+                plan_currency: 'INR',
+                plan_max_amount: plan.amount,
+                plan_recurring_amount: plan.amount,
+                plan_intervals: 1,
+                plan_interval_type: plan.intervalType,
+            }),
+        });
+    } catch (error) {
+        // A plan can already exist when the server restarts; reuse it.
+        if (error.statusCode !== 409) {
+            throw error;
+        }
+    }
+};
+
+// Public: the plans and prices. Plans are created in Cashfree when someone
+// first joins one (ensurePlan), so this never waits on Cashfree.
+exports.getMembershipPlans = (req, res) => {
+    const plans = Object.values(PLANS).map(({ key, tier, interval, planId, name, amount, duration }) => ({
+        key, tier, interval, planId, name, amount, duration,
+    }));
+    res.status(200).json({ success: true, plans });
+};
+
+exports.membershipReturn = (req, res) => {
+    const subscriptionId = req.body?.subscription_id || req.query.subscription_id;
+    const membershipUrl = new URL('/membership', process.env.FRONTEND_URL);
+    if (subscriptionId) {
+        membershipUrl.searchParams.set('subscription_id', subscriptionId);
+    }
+    res.redirect(303, membershipUrl.toString());
+};
+
+exports.getCurrentMembership = async (req, res) => {
+    try {
+        const membership = await Subscription.findOne({ user: req.user._id, isActive: true })
+            .sort({ createdAt: -1 })
+            || await Subscription.findOne({ user: req.user._id }).sort({ createdAt: -1 });
+
+        if (membership) {
+            await syncMembership(membership);
+        }
+
+        res.status(200).json({ success: true, membership: membership ? withTier(membership) : null });
+    } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+exports.createMembershipSubscription = async (req, res) => {
+    try {
+        const activeMembership = await Subscription.findOne({ user: req.user._id, isActive: true });
+        if (activeMembership) {
+            return res.status(409).json({ success: false, message: 'You already have an active membership' });
+        }
+
+        const plan = planFor(req.body || {});
+        if (!plan) {
+            return res.status(400).json({ success: false, message: 'Choose Essential (yearly) or Plus (monthly or yearly)' });
+        }
+
+        await ensurePlan(plan);
+        const subscriptionId = `sub_${req.user._id}_${generateId()}`;
+        const cashfreeSubscription = await cashfreeRequest('/subscriptions', {
+            method: 'POST',
+            body: JSON.stringify({
+                subscription_id: subscriptionId,
+                customer_details: {
+                    customer_name: req.user.name,
+                    customer_email: req.user.email,
+                    customer_phone: String(req.user.whatsappNumber || req.body.phoneNumber || '9999999999'),
+                },
+                plan_details: { plan_id: plan.planId },
+                authorization_details: {
+                    authorization_amount: 1,
+                    authorization_amount_refund: true,
+                },
+                subscription_meta: {
+                    return_url: process.env.CASHFREE_RETURN_URL || `${process.env.FRONTEND_URL}/membership`,
+                },
+            }),
+        });
+
+        await Subscription.create({
+            _id: generateId(),
+            subscriptionId,
+            cashfreeSubscriptionId: subscriptionId,
+            subscriptionSessionId: cashfreeSubscription.subscription_session_id,
+            planId: plan.planId,
+            tier: plan.tier,
+            name: plan.name,
+            description: `${plan.name} (${plan.interval}) recurring membership`,
+            amount: plan.amount,
+            duration: plan.duration,
+            user: req.user._id,
+            status: cashfreeSubscription.subscription_status || 'INITIALIZED',
+            isActive: false,
+            createdAt: new Date(),
+        });
+
+        res.status(200).json({
+            success: true,
+            subscriptionId,
+            subscriptionSessionId: cashfreeSubscription.subscription_session_id,
+        });
+    } catch (error) {
+        res.status(error.statusCode || 500).json({ success: false, message: error.message });
+    }
+};
+
+exports.getMembershipStatus = async (req, res) => {
+    try {
+        const membership = await Subscription.findOne({
+            subscriptionId: req.params.subscriptionId,
+            user: req.user._id,
+        });
+        if (!membership) {
+            return res.status(404).json({ success: false, message: 'Membership not found' });
+        }
+
+        await syncMembership(membership);
+
+        res.status(200).json({ success: true, membership: withTier(membership) });
+    } catch (error) {
+        res.status(error.statusCode || 500).json({ success: false, message: error.message });
+    }
+};
+
+exports.cancelMembership = async (req, res) => {
+    try {
+        const membership = await Subscription.findOne({
+            subscriptionId: req.params.subscriptionId,
+            user: req.user._id,
+        });
+        if (!membership) {
+            return res.status(404).json({ success: false, message: 'Membership not found' });
+        }
+
+        if (['CANCELLED', 'COMPLETED', 'EXPIRED', 'CUSTOMER_CANCELLED'].includes(membership.status)) {
+            return res.status(409).json({ success: false, message: 'This membership is already closed' });
+        }
+
+        await cashfreeRequest(`/subscriptions/${encodeURIComponent(membership.subscriptionId)}/manage`, {
+            method: 'POST',
+            body: JSON.stringify({ action: 'CANCEL' }),
+        });
+        membership.status = 'CANCELLED';
+        membership.isActive = false;
+        await membership.save();
+
+        res.status(200).json({ success: true, membership });
+    } catch (error) {
+        res.status(error.statusCode || 500).json({ success: false, message: error.message });
+    }
+};
+
+const invoiceMembershipPayment = async data => {
+    const subscriptionId = data.subscription_id || data.subscription_details?.subscription_id;
+    if (!subscriptionId || !data.cf_payment_id) return;
+    if (String(data.payment_type || '').toUpperCase() === 'AUTH') return;
+    if (data.payment_status && data.payment_status !== 'SUCCESS') return;
+
+    const membership = await Subscription.findOne({ subscriptionId });
+    if (!membership) {
+        logger.warn({ subscriptionId }, 'membership payment webhook for unknown subscription');
+        return;
+    }
+
+    try {
+        const invoice = await createMembershipInvoice(membership, {
+            cfPaymentId: data.cf_payment_id,
+            amount: data.payment_amount,
+            paidAt: data.payment_initiated_date || data.payment_schedule_date,
+        });
+        if (invoice.emailStatus === 'pending') {
+            await emailInvoice(invoice, {
+                subject: `Your MAISON membership invoice ${invoice.invoiceNumber}`,
+            });
+        }
+    } catch (error) {
+        // Recorded on the invoice; POST /jobs/invoice-retry re-sends it.
+        logger.error({ subscriptionId, err: error.message }, 'membership invoice failed');
+    }
+};
+
+exports.membershipWebhook = async (req, res) => {
+    // Signature + freshness + duplicate check: an old or replayed webhook
+    // can't flip a membership back to an earlier status.
+    const check = await verifyCashfreeWebhook(req);
+    if (!check.ok) {
+        return res.status(check.status).json({ success: check.status === 200, message: check.message });
+    }
+
+    res.status(200).json({ success: true });
+
+    try {
+        const payload = JSON.parse(req.rawBody);
+
+        // Every successful recurring charge gets its own invoice. The ₹1
+        // authorization charge (payment_type AUTH) is refunded, so it is not
+        // invoiced.
+        if (payload.type === 'SUBSCRIPTION_PAYMENT_SUCCESS') {
+            await invoiceMembershipPayment(payload.data || {});
+        }
+
+        const details = payload.data?.subscription_details || payload.data || payload;
+        const subscriptionId = details.subscription_id || payload.subscription_id;
+        const status = details.subscription_status || payload.subscription_status;
+        const nextPaymentDate = details.next_schedule_date;
+        if (subscriptionId && status) {
+            const membership = await Subscription.findOne({ subscriptionId });
+            if (membership) {
+                membership.status = status;
+                membership.isActive = status === 'ACTIVE';
+                if (nextPaymentDate) membership.nextPaymentDate = new Date(nextPaymentDate);
+                await membership.save();
+                if (membership.isActive) await sendActivationEmailOnce(membership);
+            }
+        }
+    } catch (error) {
+        console.error('Cashfree subscription webhook processing failed:', error.message);
+    }
+};

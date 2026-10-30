@@ -1,0 +1,3 @@
+/sitemap.xml https://api.maisonorderplanning.in/sitemap.xml 200
+/api/* https://api.maisonorderplanning.in/api/:splat 200
+/*      /index.html                                          200

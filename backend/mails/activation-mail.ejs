@@ -1,0 +1,39 @@
+<%- include('partials/head', { title: 'Verify your account', preheader: 'Your Maison verification code.' }) %>
+
+<p style="margin:0; font-family:Helvetica,Arial,sans-serif; font-size:10px; font-weight:bold; letter-spacing:3px; text-transform:uppercase; color:#A07C4B;">
+  Welcome to the House
+</p>
+
+<h1 style="margin:14px 0 0 0; font-family:Georgia,'Times New Roman',serif; font-size:34px; font-weight:500; line-height:1.15; color:#1A1816;">
+  Verify your account
+</h1>
+
+<p style="margin:24px 0 0 0; font-family:Helvetica,Arial,sans-serif; font-size:15px; line-height:1.75; color:#4A453F;">
+  Hello <%= name %>,
+</p>
+
+<p style="margin:14px 0 0 0; font-family:Helvetica,Arial,sans-serif; font-size:15px; line-height:1.75; color:#4A453F;">
+  Thank you for joining Maison. Enter the code below to activate your account
+  and start exploring the collection.
+</p>
+
+<!-- OTP -->
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="margin:32px 0 0 0;">
+  <tr>
+    <td align="center" style="background-color:#F7F4EF; border:1px solid #E0D9CE; padding:28px 20px;">
+      <p style="margin:0; font-family:Helvetica,Arial,sans-serif; font-size:10px; letter-spacing:3px; text-transform:uppercase; color:#8A8278;">
+        Verification Code
+      </p>
+      <p style="margin:12px 0 0 0; font-family:Georgia,'Times New Roman',serif; font-size:38px; font-weight:500; letter-spacing:10px; color:#A07C4B;">
+        <%= otp %>
+      </p>
+    </td>
+  </tr>
+</table>
+
+<p style="margin:28px 0 0 0; font-family:Helvetica,Arial,sans-serif; font-size:13px; line-height:1.7; color:#8A8278;">
+  This code is valid for a limited time. If you didn't create a Maison account,
+  you can ignore this email.
+</p>
+
+<%- include('partials/foot') %>

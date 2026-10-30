@@ -1,0 +1,595 @@
+import {
+    LOGIN_REQUEST,
+    LOGIN_FAIL,
+    LOGIN_SUCCESS,
+    REGISTER_USER_REQUEST,
+    REGISTER_USER_SUCCESS,
+    REGISTER_USER_FAIL,
+    LOAD_USER_REQUEST,
+    LOAD_USER_SUCCESS,
+    LOAD_USER_FAIL,
+    LOGOUT_SUCCESS,
+    LOGOUT_FAIL,
+    UPDATE_PROFILE_REQUEST,
+    UPDATE_PROFILE_SUCCESS,
+    UPDATE_PROFILE_FAIL,
+    UPDATE_PASSWORD_REQUEST,
+    UPDATE_PASSWORD_SUCCESS,
+    UPDATE_PASSWORD_FAIL,
+    FORGOT_PASSWORD_REQUEST,
+    FORGOT_PASSWORD_SUCCESS,
+    FORGOT_PASSWORD_FAIL,
+    RESET_PASSWORD_REQUEST,
+    RESET_PASSWORD_SUCCESS,
+    RESET_PASSWORD_FAIL,
+    ALL_USERS_REQUEST,
+    ALL_USERS_SUCCESS,
+    ALL_USERS_FAIL,
+    DELETE_USER_REQUEST,
+    DELETE_USER_SUCCESS,
+    DELETE_USER_FAIL,
+    UPDATE_USER_REQUEST,
+    UPDATE_USER_SUCCESS,
+    UPDATE_USER_FAIL,
+    USER_DETAILS_REQUEST,
+    USER_DETAILS_SUCCESS,
+    USER_DETAILS_FAIL,
+    GOOGLE_LOGIN_REQUEST,
+    GOOGLE_LOGIN_SUCCESS,
+    GOOGLE_LOGIN_FAIL,
+    LOGIN_2FA_REQUIRED,
+    CLEAR_ERRORS,
+    LOGIN_2FA_REQUEST,
+    LOGIN_2FA_SUCCESS,
+    LOGIN_2FA_FAIL,
+    TWO_FACTOR_SETUP_REQUEST,
+    TWO_FACTOR_SETUP_SUCCESS,
+    TWO_FACTOR_SETUP_FAIL,
+    TWO_FACTOR_VERIFY_FAIL,
+    TWO_FACTOR_VERIFY_SUCCESS,
+    TWO_FACTOR_VERIFY_REQUEST,
+    TWO_FACTOR_DISABLE_REQUEST,
+    TWO_FACTOR_DISABLE_SUCCESS,
+    TWO_FACTOR_DISABLE_FAIL,
+    CLEAR_2FA_ERROR,
+    DEMO_LOGIN_SUCCESS,
+    DEMO_LOGIN_REQUEST,
+    DEMO_LOGIN_FAIL
+} from '../constants/userConstants';
+import { getRememberMe } from '../utils/rememberMe';
+import axios from 'axios';
+
+// Login
+export const login = (email, password) => async dispatch => {
+    try {
+        dispatch({ type: LOGIN_REQUEST });
+
+        const config = {
+            headers: {
+                'Content-Type': 'application/json',
+            },
+        };
+
+        const { data } = await axios.post(
+            '/api/v1/login',
+            { email, password, rememberMe: getRememberMe() },
+            config
+        );
+
+        // 2FA enabled → don't complete login yet
+        if (data.twoFactorRequired) {
+            dispatch({
+                type: LOGIN_2FA_REQUIRED,
+                payload: {
+                    token: data.twoFactorToken,
+                    enrollmentRequired: data.enrollmentRequired === true,
+                },
+            });
+
+            return {
+                twoFactorRequired: true,
+                twoFactorToken: data.twoFactorToken,
+            };
+        }
+
+        dispatch({
+            type: LOGIN_SUCCESS,
+            payload: data.user,
+        });
+
+        return data;
+
+    } catch (error) {
+        // A verified email is required before a session can be created. This
+        // is an expected state, so let the login UI offer a resend action
+        // instead of treating it as a generic login failure.
+        if (error.response?.data?.emailVerificationRequired) {
+            dispatch({ type: LOGIN_FAIL, payload: null });
+            return error.response.data;
+        }
+
+        dispatch({
+            type: LOGIN_FAIL,
+            payload:
+                error.response?.data?.message ||
+                error.message,
+        });
+
+        throw error;
+    }
+};
+
+export const demoLogin = () => async (dispatch) => {
+    try {
+        dispatch({
+            type: DEMO_LOGIN_REQUEST
+        });
+
+        const { data } = await axios.get(
+            '/api/v1/demo/quick-login',
+            {
+                withCredentials: true
+            }
+        );
+
+        if (!data.success) {
+            throw new Error(
+                data.message || 'Failed to start demo session'
+            );
+        }
+
+        dispatch({
+            type: DEMO_LOGIN_SUCCESS,
+            payload: data.user
+        });
+
+        return data.user;
+
+    } catch (error) {
+        dispatch({
+            type: DEMO_LOGIN_FAIL,
+            payload:
+                error.response?.data?.message ||
+                error.message ||
+                'Unable to start demo session'
+        });
+
+        throw error;
+    }
+};
+
+// Register
+export const register = formData => async dispatch => {
+    try {
+        dispatch({ type: REGISTER_USER_REQUEST });
+
+        const { data } = await axios.post(
+            `/api/v1/register`,
+            formData,
+            { headers: { 'Content-Type': 'multipart/form-data' } }
+        );
+
+        dispatch({ type: REGISTER_USER_SUCCESS, payload: data.message });
+    } catch (error) {
+        dispatch({
+            type: REGISTER_USER_FAIL,
+            payload: error.response ? error.response.data.message : error.message
+        });
+    }
+};
+
+// Load User
+// The backend (Render free tier) sleeps when idle and can take up to a minute
+// to wake. Until now a timed-out /me looked like "not signed in", so returning
+// visitors with a valid session were shown as logged out. Network errors and
+// 5xx (including proxy 502/503/504) are now retried; only a real 401/403
+// means "not signed in".
+const ME_RETRY_DELAYS_MS = [1500, 3000, 5000, 8000, 12000, 15000, 15000];
+const isTransient = error => !error.response || error.response.status >= 500;
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+export const loadUser = () => async dispatch => {
+    dispatch({ type: LOAD_USER_REQUEST });
+    let lastError;
+    for (let attempt = 0; attempt <= ME_RETRY_DELAYS_MS.length; attempt += 1) {
+        try {
+            const { data } = await axios.get(`/api/v1/me`, { timeout: 30000 });
+            dispatch({ type: LOAD_USER_SUCCESS, payload: data.user });
+            return;
+        } catch (error) {
+            lastError = error;
+            if (!isTransient(error) || attempt === ME_RETRY_DELAYS_MS.length) break;
+            await wait(ME_RETRY_DELAYS_MS[attempt]);
+        }
+    }
+    {
+        const error = lastError;
+        const status = error.response?.status;
+
+        // `/me` is a session probe run when the app starts. A 401/403 simply
+        // means the visitor has no valid session, not that something failed.
+        // Keep that expected state out of the global error field so it cannot
+        // become a misleading toast on the login page.
+        dispatch({
+            type: LOAD_USER_FAIL,
+            payload:
+                status === 401 || status === 403
+                    ? null
+                    : error.response?.data?.message || error.message
+        });
+    }
+};
+
+// Logout User
+export const logout = () => async dispatch => {
+    try {
+        await axios.get(`/api/v1/logout`);
+
+        dispatch({ type: LOGOUT_SUCCESS });
+    } catch (error) {
+        dispatch({ type: LOGOUT_FAIL, payload: error.response.data.message });
+    }
+};
+
+// Update Profile
+export const updateProfile = userData => async dispatch => {
+    try {
+        dispatch({ type: UPDATE_PROFILE_REQUEST });
+
+        const { data } = await axios.put('/api/v1/me/update', userData);
+
+        dispatch({ type: UPDATE_PROFILE_SUCCESS, payload: data.success });
+    } catch (error) {
+        dispatch({
+            type: UPDATE_PROFILE_FAIL,
+            payload: error.response?.data?.message || error.message
+        });
+    }
+};
+
+// Update Password
+export const updatePassword = passwords => async dispatch => {
+    try {
+        dispatch({ type: UPDATE_PASSWORD_REQUEST });
+
+        const config = { headers: { 'Content-Type': 'application/json' } };
+
+        const { data } = await axios.put(`/api/v1/password/update`, passwords, config);
+
+        dispatch({ type: UPDATE_PASSWORD_SUCCESS, payload: data.success });
+    } catch (error) {
+        dispatch({
+            type: UPDATE_PASSWORD_FAIL,
+            payload: error.response.data.message
+        });
+    }
+};
+
+// Forgot Password
+export const forgotPassword = email => async dispatch => {
+    try {
+        dispatch({ type: FORGOT_PASSWORD_REQUEST });
+
+        const config = { headers: { 'Content-Type': 'application/json' } };
+
+        const { data } = await axios.post(`/api/v1/password/forgot`, email, config);
+
+        dispatch({ type: FORGOT_PASSWORD_SUCCESS, payload: data.message });
+    } catch (error) {
+        dispatch({
+            type: FORGOT_PASSWORD_FAIL,
+            payload: error.response.data.message
+        });
+    }
+};
+
+// Reset Password
+export const resetPassword = (token, passwords) => async dispatch => {
+    try {
+        dispatch({ type: RESET_PASSWORD_REQUEST });
+
+        const config = { headers: { 'Content-Type': 'application/json' } };
+
+        const { data } = await axios.put(
+            `/api/v1/password/reset/${token}`,
+            passwords,
+            config
+        );
+
+        dispatch({ type: RESET_PASSWORD_SUCCESS, payload: data.success });
+    } catch (error) {
+        dispatch({
+            type: RESET_PASSWORD_FAIL,
+            payload: error.response.data.message
+        });
+    }
+};
+
+// get All Users
+export const getAllUsers = () => async dispatch => {
+    try {
+        dispatch({ type: ALL_USERS_REQUEST });
+        const { data } = await axios.get(`/api/v1/admin/users`);
+
+        dispatch({ type: ALL_USERS_SUCCESS, payload: data.users });
+    } catch (error) {
+        dispatch({
+            type: ALL_USERS_FAIL,
+            payload: error.response.data.message
+        });
+    }
+};
+
+// get User Details
+export const getUserDetails = id => async dispatch => {
+    try {
+        dispatch({ type: USER_DETAILS_REQUEST });
+        const { data } = await axios.get(`/api/v1/admin/user/${id}`);
+
+        dispatch({ type: USER_DETAILS_SUCCESS, payload: data.user });
+    } catch (error) {
+        dispatch({
+            type: USER_DETAILS_FAIL,
+            payload: error.response.data.message
+        });
+    }
+};
+
+// Update User
+export const updateUser = (id, userData) => async dispatch => {
+    try {
+        dispatch({ type: UPDATE_USER_REQUEST });
+
+        const config = { headers: { 'Content-Type': 'application/json' } };
+
+        const { data } = await axios.put(
+            `/api/v1/admin/user/${id}`,
+            userData,
+            config
+        );
+
+        console.log('DATA', data.user);
+
+        dispatch({ type: UPDATE_USER_SUCCESS, payload: data.user });
+    } catch (error) {
+        dispatch({
+            type: UPDATE_USER_FAIL,
+            payload: error.response.data.message
+        });
+
+        console.log('ERROR', error);
+    }
+};
+
+// Delete User
+export const deleteUser = id => async dispatch => {
+    try {
+        dispatch({ type: DELETE_USER_REQUEST });
+
+        const { data } = await axios.delete(`/api/v1/admin/user/${id}`);
+
+        dispatch({ type: DELETE_USER_SUCCESS, payload: data.user });
+    } catch (error) {
+        dispatch({
+            type: DELETE_USER_FAIL,
+            payload: error.response.data.message
+        });
+    }
+};
+
+export const loginWithGoogle = (googleToken) => async (dispatch) => {
+    try {
+        dispatch({ type: GOOGLE_LOGIN_REQUEST });
+
+        const config = { 
+            headers: { "Content-Type": "application/json" },
+            credentials: true
+        };
+
+        const { data } = await axios.post(
+            `/api/v1/auth/google`,
+            { idToken: googleToken, rememberMe: getRememberMe() },
+            config
+        );
+
+        if (data.twoFactorRequired) {
+            dispatch({
+                type: LOGIN_2FA_REQUIRED,
+                payload: {
+                    token: data.twoFactorToken,
+                    enrollmentRequired: data.enrollmentRequired === true,
+                },
+            });
+            return data;
+        }
+
+        dispatch({ type: GOOGLE_LOGIN_SUCCESS, payload: data.user });
+        return data;
+
+    } catch (error) {
+        dispatch({
+            type: GOOGLE_LOGIN_FAIL,
+            payload: error.response.data.message,
+        });
+    }
+};
+
+// Clearing Errors
+export const clearErrors = () => async dispatch => {
+    dispatch({ type: CLEAR_ERRORS });
+};
+
+// ---- Address book -------------------------------------------------------
+// The saved addresses live on the user document, so after a change we refresh
+// the profile via loadUser() rather than maintaining a separate reducer.
+export const addAddress = address => async dispatch => {
+    const config = { headers: { 'Content-Type': 'application/json' } };
+    const { data } = await axios.post('/api/v1/address/new', address, config);
+    dispatch(loadUser());
+    return data;
+};
+
+export const deleteAddress = addressId => async dispatch => {
+    const { data } = await axios.delete(`/api/v1/address/${addressId}`);
+    dispatch(loadUser());
+    return data;
+};
+
+// Complete login with 2FA
+export const verifyLoginOtp = (twoFactorToken, code, rememberDevice = false) => async dispatch => {
+    try {
+        dispatch({ type: LOGIN_2FA_REQUEST });
+
+        const { data } = await axios.post(
+            '/api/v1/login/2fa',
+            {
+                twoFactorToken,
+                code,
+                rememberDevice,
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+            }
+        );
+
+        dispatch({
+            type: LOGIN_2FA_SUCCESS,
+            payload: data.user,
+        });
+
+        return data;
+    } catch (error) {
+        const message =
+            error.response?.data?.message || error.message;
+
+        dispatch({
+            type: LOGIN_2FA_FAIL,
+            payload: message,
+        });
+
+        throw new Error(message);
+    }
+};
+
+// Complete required first-time TOTP enrollment for an admin. The server only
+// issues the admin session after the code has been verified.
+export const enrollAdminTwoFactor = (twoFactorToken, code, rememberDevice = false) => async dispatch => {
+    try {
+        dispatch({ type: LOGIN_2FA_REQUEST });
+        const { data } = await axios.post(
+            '/api/v1/login/2fa/enroll',
+            { twoFactorToken, code, rememberDevice },
+            { headers: { 'Content-Type': 'application/json' } }
+        );
+        dispatch({ type: LOGIN_2FA_SUCCESS, payload: data.user });
+        return data;
+    } catch (error) {
+        const message = error.response?.data?.message || error.message;
+        dispatch({ type: LOGIN_2FA_FAIL, payload: message });
+        throw new Error(message);
+    }
+};
+
+// Start 2FA setup
+export const setupTwoFactorAuth = () => async dispatch => {
+    try {
+        dispatch({ type: TWO_FACTOR_SETUP_REQUEST });
+
+        const { data } = await axios.get(
+            '/api/v1/2fa/setup'
+        );
+
+        dispatch({
+            type: TWO_FACTOR_SETUP_SUCCESS,
+            payload: data,
+        });
+
+        return data;
+    } catch (error) {
+        const message =
+            error.response?.data?.message || error.message;
+
+        dispatch({
+            type: TWO_FACTOR_SETUP_FAIL,
+            payload: message,
+        });
+
+        throw new Error(message);
+    }
+};
+
+// Verify setup code and enable 2FA
+export const verifyTwoFactorAuth = code => async dispatch => {
+    try {
+        dispatch({ type: TWO_FACTOR_VERIFY_REQUEST });
+
+        const { data } = await axios.post(
+            '/api/v1/2fa/verify',
+            { code },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+            }
+        );
+
+        dispatch({
+            type: TWO_FACTOR_VERIFY_SUCCESS,
+            payload: data,
+        });
+
+        return data;
+    } catch (error) {
+        const message =
+            error.response?.data?.message || error.message;
+
+        dispatch({
+            type: TWO_FACTOR_VERIFY_FAIL,
+            payload: message,
+        });
+
+        throw new Error(message);
+    }
+};
+
+// Disable 2FA
+export const disableTwoFactorAuth = code => async dispatch => {
+    try {
+        dispatch({ type: TWO_FACTOR_DISABLE_REQUEST });
+
+        const { data } = await axios.post(
+            '/api/v1/2fa/disable',
+            { code },
+            {
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+            }
+        );
+
+        dispatch({
+            type: TWO_FACTOR_DISABLE_SUCCESS,
+            payload: data,
+        });
+
+        return data;
+    } catch (error) {
+        const message =
+            error.response?.data?.message || error.message;
+
+        dispatch({
+            type: TWO_FACTOR_DISABLE_FAIL,
+            payload: message,
+        });
+
+        throw new Error(message);
+    }
+};
+
+export const clear2FAError = () => (dispatch) => {
+    dispatch({
+        type: CLEAR_2FA_ERROR,
+    });
+};

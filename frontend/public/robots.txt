@@ -1,0 +1,20 @@
+User-agent: *
+Allow: /
+Disallow: /admin
+Disallow: /account
+Disallow: /me/
+Disallow: /cart
+Disallow: /shipping$
+Allow: /shipping-policy
+Disallow: /payment
+Disallow: /order
+Disallow: /orders
+Disallow: /success
+Disallow: /wishlist
+Disallow: /password/
+Disallow: /verify-email/
+Disallow: /login/2fa
+Disallow: /login/magic/
+Disallow: /api/
+
+Sitemap: https://maisonorderplanning.in/sitemap.xml

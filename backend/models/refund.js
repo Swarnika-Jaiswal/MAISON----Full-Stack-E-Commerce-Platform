@@ -1,0 +1,45 @@
+const mongoose = require('mongoose');
+
+mongoose.set('strictQuery', false);
+
+const refundSchema = new mongoose.Schema({
+    _id: String,
+    order: {
+        type: String,
+        ref: 'Order',
+        required: true
+    },
+    amount: {
+        type: Number,
+        required: true
+    },
+    initiatedAt: {
+        type: Date,
+        default: Date.now
+    },
+    status: {
+        type: String,
+        default: 'Initiated'
+    },
+    completedAt: {
+        type: Date
+    },
+    // Where the money went: back to the original payment, or store credit.
+    method: {
+        type: String,
+        enum: ['original', 'store-credit'],
+        default: 'original'
+    },
+    // Portion (rupees) returned as store credit.
+    storeCreditAmount: {
+        type: Number,
+        default: 0
+    },
+    isDemo: {
+        type: Boolean,
+        default: false,
+        index: true
+    }
+});
+
+module.exports = mongoose.model('Refund', refundSchema);
